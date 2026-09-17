@@ -19,3 +19,9 @@ python-socketio==5.17.0
 simple-websocket==1.1.0
 Werkzeug==3.1.8
 wsproto==1.3.2
+Flask
+Flask-SocketIO
+PyMySQL
+python-dotenv
+gunicorn
+eventlet
