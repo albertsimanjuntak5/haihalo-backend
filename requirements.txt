@@ -24,6 +24,6 @@ Flask-SocketIO
 PyMySQL
 python-dotenv
 gunicorn
-eventlet
 gevent
 gevent-websocket
+packaging
