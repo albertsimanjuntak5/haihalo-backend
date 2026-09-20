@@ -1,100 +1,98 @@
 from flask import Flask, request, jsonify
-from flask_socketio import SocketIO, emit
 from flask_cors import CORS
-import pymysql
-import os
-from werkzeug.security import generate_password_hash, check_password_hash
+from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
-
-# Izinkan CORS penuh dari domain frontend mana pun
-CORS(app, resources={r"/*": {"origins": "*"}})
+app.config['SECRET_KEY'] = 'secret_key_haihalo_123'
+CORS(app)
 
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Konfigurasi Koneksi Database Aiven
-def get_db_connection():
-    # Menyesuaikan nama variabel dengan file .env kamu (DB_HOST, DB_USER, dst)
-    host = os.getenv("DB_HOST") or os.getenv("MYSQLHOST")
-    user = os.getenv("DB_USER") or os.getenv("MYSQLUSER")
-    password = os.getenv("DB_PASS") or os.getenv("MYSQLPASSWORD")
-    database = os.getenv("DB_NAME") or os.getenv("MYSQLDATABASE")
-    port = int(os.getenv("DB_PORT") or os.getenv("MYSQLPORT", 21021))
+# Database sederhana di memori (Penyimpanan sementara)
+users_db = {}
 
-    return pymysql.connect(
-        host=host,
-        user=user,
-        password=password,
-        database=database,
-        port=port,
-        cursorclass=pymysql.cursors.DictCursor,
-        ssl={'ssl': {}} # Aiven mewajibkan SSL
-    )
+# Pemetaan username -> Socket ID (request.sid)
+user_sockets = {}
 
-# --- ENDPOINT REGISTER ---
-@app.route('/register', methods=['POST', 'OPTIONS'])
+
+# ================= ROUTE API (LOGIN & REGISTER) =================
+
+@app.route('/register', methods=['POST'])
 def register():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-
-    data = request.json or {}
-    username = data.get('username')
-    password = data.get('password')
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
 
     if not username or not password:
-        return jsonify({"status": "error", "message": "Username dan password wajib diisi!"}), 400
+        return jsonify({'status': 'error', 'message': 'Username dan password wajib diisi'}), 400
 
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            # Cek apakah username sudah ada
-            cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
-            if cursor.fetchone():
-                conn.close()
-                return jsonify({"status": "error", "message": "Username sudah terdaftar!"}), 400
+    if username in users_db:
+        return jsonify({'status': 'error', 'message': 'Username sudah terdaftar'}), 400
 
-            # Hash password lalu simpan
-            hashed_pwd = generate_password_hash(password)
-            cursor.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, hashed_pwd))
-            conn.commit()
-            conn.close()
-            
-            return jsonify({"status": "success", "message": "Registrasi berhasil! Silakan masuk."})
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Database error: {str(e)}"}), 500
+    users_db[username] = password
+    return jsonify({'status': 'success', 'message': 'Registrasi berhasil'}), 200
 
-# --- ENDPOINT LOGIN ---
-@app.route('/login', methods=['POST', 'OPTIONS'])
+
+@app.route('/login', methods=['POST'])
 def login():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
 
-    data = request.json or {}
-    username = data.get('username')
-    password = data.get('password')
+    if username not in users_db or users_db[username] != password:
+        return jsonify({'status': 'error', 'message': 'Username atau password salah'}), 401
 
-    if not username or not password:
-        return jsonify({"status": "error", "message": "Username dan password wajib diisi!"}), 400
+    return jsonify({'status': 'success', 'message': 'Login berhasil'}), 200
 
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
-            user = cursor.fetchone()
-            conn.close()
 
-            # Verifikasi password yang di-hash
-            if user and check_password_hash(user['password'], password):
-                return jsonify({"status": "success", "message": "Login berhasil!", "username": username})
-            else:
-                return jsonify({"status": "error", "message": "Username atau password tidak sesuai"}), 401
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Database error: {str(e)}"}), 500
+# ================= EVENT SOCKET.IO (REALTIME) =================
 
-# WebSocket Event
-@socketio.on('message')
-def handle_message(msg):
-    emit('message', msg, broadcast=True)
+@socketio.on('connect')
+def handle_connect():
+    print(f"[CONNECTED] Socket ID: {request.sid}")
+
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    # Hapus socket ID jika user terputus
+    disconnected_user = None
+    for username, sid in list(user_sockets.items()):
+        if sid == request.sid:
+            disconnected_user = username
+            del user_sockets[username]
+            break
+    print(f"[DISCONNECTED] User: {disconnected_user} ({request.sid})")
+
+
+@socketio.on('register_user')
+def handle_register_user(username):
+    """Mendaftarkan username ke Socket ID saat user login/konek"""
+    if username:
+        user_sockets[username] = request.sid
+        print(f"[REGISTERED] {username} -> {request.sid}")
+
+
+@socketio.on('private_message')
+def handle_private_message(data):
+    """Mengirim pesan khusus 1-on-1 ke penerima (target)"""
+    sender = data.get('sender')
+    target = data.get('target')
+    message = data.get('message')
+
+    print(f"[CHAT] Dari '{sender}' ke '{target}': {message}")
+
+    target_sid = user_sockets.get(target)
+
+    # Kirim ke penerima jika penerima sedang online
+    if target_sid:
+        emit('private_message', {
+            'sender': sender,
+            'message': message
+        }, room=target_sid)
+
+
+# ================= RUN SERVER =================
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000)
+    # Jalankan menggunakan socketio.run
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
