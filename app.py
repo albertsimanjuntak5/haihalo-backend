@@ -9,6 +9,7 @@ app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+# Koneksi Database
 def get_db_connection():
     return mysql.connector.connect(
         host=os.getenv("DB_HOST"),
@@ -18,6 +19,8 @@ def get_db_connection():
         database=os.getenv("DB_NAME", "defaultdb"),
         ssl_mode="REQUIRED"
     )
+
+# ---------------- API ROUTES ----------------
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -123,6 +126,7 @@ def get_messages():
         conn.close()
 
 # ---------------- SOCKET.IO REAL-TIME CHAT ----------------
+
 @socketio.on('register_user')
 def handle_register_user(username):
     if username:
