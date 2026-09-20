@@ -1,90 +1,85 @@
-import os
-import mysql.connector
-from dotenv import load_dotenv
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
-
-load_dotenv()
+from flask_cors import CORS
+import pymysql
+import os
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret-haihalo-key'
-
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+# Konfigurasi Database Aiven dari Environment Variables
 def get_db_connection():
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST"),
-        port=int(os.getenv("DB_PORT", 21021)),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASS"),
-        database=os.getenv("DB_NAME")
+    return pymysql.connect(
+        host=os.getenv("MYSQLHOST"),
+        user=os.getenv("MYSQLUSER"),
+        password=os.getenv("MYSQLPASSWORD"),
+        database=os.getenv("MYSQLDATABASE"),
+        port=int(os.getenv("MYSQLPORT", 3306)),
+        cursorclass=pymysql.cursors.DictCursor
     )
 
-@app.route('/')
-def home():
-    return jsonify({"status": "success", "message": "Backend HaiHalo Server Running!"})
-
-@app.route('/api/register', methods=['POST'])
+# --- ENDPOINT REGISTER ---
+@app.route('/register', methods=['POST'])
 def register():
-    data = request.get_json()
+    data = request.json
     username = data.get('username')
     password = data.get('password')
 
     if not username or not password:
         return jsonify({"status": "error", "message": "Username dan password wajib diisi!"}), 400
 
+    conn = get_db_connection()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        query = "INSERT INTO users (username, password) VALUES (%s, %s)"
-        cursor.execute(query, (username, password))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return jsonify({"status": "success", "message": "User berhasil terdaftar!"}), 201
-    except mysql.connector.Error as err:
-        return jsonify({"status": "error", "message": str(err)}), 400
+        with conn.cursor() as cursor:
+            # Cek apakah username sudah dipakai
+            cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+            if cursor.fetchone():
+                return jsonify({"status": "error", "message": "Username sudah terdaftar!"}), 400
 
-@app.route('/api/login', methods=['POST'])
+            # Hash password dan simpan ke database
+            hashed_pwd = generate_password_hash(password)
+            cursor.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, hashed_pwd))
+            conn.commit()
+            
+            return jsonify({"status": "success", "message": "Registrasi berhasil! Silakan login."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        conn.close()
+
+# --- ENDPOINT LOGIN ---
+@app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
+    data = request.json
     username = data.get('username')
     password = data.get('password')
 
+    if not username or not password:
+        return jsonify({"status": "error", "message": "Username dan password wajib diisi!"}), 400
+
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    query = "SELECT * FROM users WHERE username = %s AND password = %s"
-    cursor.execute(query, (username, password))
-    user = cursor.fetchone()
-    cursor.close()
-    conn.close()
+    try:
+        with conn.cursor() as cursor:
+            # Cari user berdasarkan username
+            cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+            user = cursor.fetchone()
 
-    if user:
-        return jsonify({"status": "success", "user": {"id": user['id'], "username": user['username']}})
-    else:
-        return jsonify({"status": "error", "message": "Username atau password salah!"}), 401
-
-@socketio.on('send_message')
-def handle_send_message(data):
-    sender_id = data.get('sender_id')
-    message_text = data.get('message_text')
-
-    if sender_id and message_text:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        query = "INSERT INTO messages (sender_id, message_text) VALUES (%s, %s)"
-        cursor.execute(query, (sender_id, message_text))
-        conn.commit()
-        cursor.close()
+            # Verifikasi user & password
+            if user and check_password_hash(user['password'], password):
+                return jsonify({"status": "success", "message": "Login berhasil!", "username": username})
+            else:
+                return jsonify({"status": "error", "message": "Username atau password tidak sesuai"}), 401
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
         conn.close()
 
-        emit('receive_message', {
-            'sender_id': sender_id,
-            'message_text': message_text
-        }, broadcast=True)
+# WebSocket Event
+@socketio.on('message')
+def handle_message(msg):
+    emit('message', msg, broadcast=True)
 
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5000)
