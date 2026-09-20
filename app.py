@@ -17,7 +17,7 @@ def get_db_connection():
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASS"),
         database=os.getenv("DB_NAME", "defaultdb"),
-        ssl_mode="REQUIRED"
+        ssl_verify_cert=False
     )
 
 # ---------------- API ROUTES ----------------
@@ -142,11 +142,9 @@ def handle_private_message(data):
     if sender and target and message:
         payload = {'sender': sender, 'target': target, 'message': message}
         
-        # Kirim ke penerima dan ke pengirim
         emit('private_message', payload, room=target)
         emit('private_message', payload, room=sender)
 
-        # Simpan ke Database MySQL
         conn = get_db_connection()
         cursor = conn.cursor()
         try:
