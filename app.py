@@ -6,10 +6,11 @@ import os
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-CORS(app)
+# Izinkan CORS untuk semua domain & method (POST/GET/OPTIONS)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Konfigurasi Database Aiven dari Environment Variables
 def get_db_connection():
     return pymysql.connect(
         host=os.getenv("MYSQLHOST"),
@@ -20,10 +21,12 @@ def get_db_connection():
         cursorclass=pymysql.cursors.DictCursor
     )
 
-# --- ENDPOINT REGISTER ---
-@app.route('/register', methods=['POST'])
+@app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    data = request.json
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
+    data = request.json or {}
     username = data.get('username')
     password = data.get('password')
 
@@ -33,26 +36,26 @@ def register():
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            # Cek apakah username sudah dipakai
             cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
             if cursor.fetchone():
                 return jsonify({"status": "error", "message": "Username sudah terdaftar!"}), 400
 
-            # Hash password dan simpan ke database
             hashed_pwd = generate_password_hash(password)
             cursor.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, hashed_pwd))
             conn.commit()
             
-            return jsonify({"status": "success", "message": "Registrasi berhasil! Silakan login."})
+            return jsonify({"status": "success", "message": "Registrasi berhasil! Silakan masuk."})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         conn.close()
 
-# --- ENDPOINT LOGIN ---
-@app.route('/login', methods=['POST'])
+@app.route('/login', methods=['POST', 'OPTIONS'])
 def login():
-    data = request.json
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    data = request.json or {}
     username = data.get('username')
     password = data.get('password')
 
@@ -62,11 +65,9 @@ def login():
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            # Cari user berdasarkan username
             cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
             user = cursor.fetchone()
 
-            # Verifikasi user & password
             if user and check_password_hash(user['password'], password):
                 return jsonify({"status": "success", "message": "Login berhasil!", "username": username})
             else:
@@ -76,7 +77,6 @@ def login():
     finally:
         conn.close()
 
-# WebSocket Event
 @socketio.on('message')
 def handle_message(msg):
     emit('message', msg, broadcast=True)
