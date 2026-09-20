@@ -1,66 +1,91 @@
-from flask import Flask, request, jsonify
-from flask_socketio import SocketIO, emit, join_room, leave_room
-from flask_cors import CORS
-import mysql.connector
 import os
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room
+import mysql.connector
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'rahasia_super_aman'
 CORS(app)
-
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Konfigurasi Database (Sesuaikan dengan kredensial Anda)
-DB_CONFIG = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': '',
-    'database': 'haihalo_db'
-}
-
 def get_db_connection():
-    return mysql.connector.connect(**DB_CONFIG)
+    return mysql.connector.connect(
+        host=os.getenv("DB_HOST"),
+        port=int(os.getenv("DB_PORT", 21021)),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASS"),
+        database=os.getenv("DB_NAME", "defaultdb"),
+        ssl_mode="REQUIRED"
+    )
 
-# ---------------- API ENDPOINTS ----------------
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+
+    if not username or not password:
+        return jsonify({"status": "error", "message": "Username dan password wajib diisi"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+        if cursor.fetchone():
+            return jsonify({"status": "error", "message": "Username sudah terdaftar"}), 400
+
+        hashed_password = generate_password_hash(password)
+        cursor.execute(
+            "INSERT INTO users (username, password) VALUES (%s, %s)",
+            (username, hashed_password)
+        )
+        conn.commit()
+        return jsonify({"status": "success", "message": "Registrasi berhasil, silakan login"}), 201
+    except Exception as e:
+        print("Error Register:", e)
+        return jsonify({"status": "error", "message": "Gagal meregistrasi akun"}), 500
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.json
-    username = data.get('username')
-    
-    if not username:
-        return jsonify({'status': 'error', 'message': 'Username wajib diisi'}), 400
-    
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+
+    if not username or not password:
+        return jsonify({"status": "error", "message": "Username dan password wajib diisi"}), 400
+
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
     try:
-        # Cek apakah user sudah ada
-        cursor.execute("SELECT username FROM users WHERE username = %s", (username,))
+        cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
         user = cursor.fetchone()
-        
-        if not user:
-            # Buat user baru jika belum terdaftar
-            cursor.execute("INSERT INTO users (username) VALUES (%s)", (username,))
-            conn.commit()
-            
-        return jsonify({'status': 'success', 'username': username}), 200
+
+        if not user or not check_password_hash(user['password'], password):
+            return jsonify({"status": "error", "message": "Username atau password salah"}), 401
+
+        return jsonify({"status": "success", "message": "Login berhasil", "username": username}), 200
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        print("Error Login:", e)
+        return jsonify({"status": "error", "message": "Gagal melakukan login"}), 500
     finally:
         cursor.close()
         conn.close()
 
 @app.route('/users', methods=['GET'])
 def get_users():
-    current_user = request.args.get('current_user')
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
     try:
-        cursor.execute("SELECT username FROM users WHERE username != %s", (current_user,))
-        users = cursor.fetchall()
-        return jsonify({'users': [u['username'] for u in users]}), 200
+        cursor.execute("SELECT username FROM users ORDER BY username ASC")
+        users = [row[0] for row in cursor.fetchall()]
+        return jsonify(users), 200
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        print("Error Fetch Users:", e)
+        return jsonify([]), 500
     finally:
         cursor.close()
         conn.close()
@@ -69,38 +94,40 @@ def get_users():
 def get_messages():
     user1 = request.args.get('user1')
     user2 = request.args.get('user2')
-    
+
     if not user1 or not user2:
-        return jsonify({'status': 'error', 'message': 'Parameter user1 & user2 diperlukan'}), 400
-        
+        return jsonify([]), 400
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("""
+        query = """
             SELECT sender, target, message, created_at 
             FROM messages 
             WHERE (sender = %s AND target = %s) OR (sender = %s AND target = %s)
-            ORDER BY id ASC
-        """, (user1, user2, user2, user1))
+            ORDER BY created_at ASC
+        """
+        cursor.execute(query, (user1, user2, user2, user1))
         messages = cursor.fetchall()
-        return jsonify({'messages': messages}), 200
+
+        for msg in messages:
+            if msg.get('created_at'):
+                msg['created_at'] = msg['created_at'].isoformat()
+
+        return jsonify(messages), 200
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        print("Error Fetch Messages:", e)
+        return jsonify([]), 500
     finally:
         cursor.close()
         conn.close()
 
-# ---------------- SOCKET.IO EVENTS ----------------
-
-@app.on_event('connect')
-def handle_connect():
-    print("[SOCKET] Client connected")
-
+# ---------------- SOCKET.IO REAL-TIME CHAT ----------------
 @socketio.on('register_user')
 def handle_register_user(username):
     if username:
         join_room(username)
-        print(f"[SOCKET] User '{username}' mendaftar room.")
+        print(f"[Socket] User '{username}' berhasil masuk ke room socket.")
 
 @socketio.on('private_message')
 def handle_private_message(data):
@@ -109,17 +136,13 @@ def handle_private_message(data):
     message = data.get('message')
 
     if sender and target and message:
-        payload = {
-            'sender': sender,
-            'target': target,
-            'message': message
-        }
+        payload = {'sender': sender, 'target': target, 'message': message}
         
-        # Kirim pesan secara real-time ke room penerima DAN pengirim
+        # Kirim ke penerima dan ke pengirim
         emit('private_message', payload, room=target)
         emit('private_message', payload, room=sender)
 
-        # Simpan pesan ke MySQL Database
+        # Simpan ke Database MySQL
         conn = get_db_connection()
         cursor = conn.cursor()
         try:
@@ -129,10 +152,11 @@ def handle_private_message(data):
             )
             conn.commit()
         except Exception as e:
-            print("[DB ERROR]", e)
+            print("Error Save Message DB:", e)
         finally:
             cursor.close()
             conn.close()
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    port = int(os.getenv("PORT", 5000))
+    socketio.run(app, host='0.0.0.0', port=port)
